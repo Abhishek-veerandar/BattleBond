@@ -1,0 +1,20 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; background: #f4f4f5; color: #18181b; }
+.app { max-width: 720px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+h1 { font-size: 20px; margin: 0; }
+.card { background: #fff; border: 1px solid #e4e4e7; border-radius: 8px; padding: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button { font: inherit; padding: 8px 12px; border-radius: 6px; border: 1px solid #a1a1aa; background: #fff; cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+button.selected { outline: 2px solid #2563eb; }
+input { font: inherit; padding: 8px; border-radius: 6px; border: 1px solid #a1a1aa; }
+.seats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.seat { padding: 8px; border-radius: 6px; border: 1px dashed #a1a1aa; font-size: 14px; }
+.seat.me { border: 2px solid #2563eb; }
+.muted { color: #71717a; font-size: 13px; }
+.error { color: #b91c1c; font-size: 14px; }
+.log { height: 280px; overflow-y: auto; font-size: 13px; line-height: 1.5; font-family: ui-monospace, monospace; }
+.log .turn { font-weight: 600; margin-top: 6px; }
+.mon { font-size: 14px; }
+.mon.fainted { text-decoration: line-through; color: #a1a1aa; }

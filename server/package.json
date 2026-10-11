@@ -13,7 +13,8 @@
   "dependencies": {
     "@pkmn/sim": "^0.10.0",
     "@tagteam/shared": "workspace:*",
-    "colyseus": "^0.16.0"
+    "colyseus": "^0.16.0",
+    "@smogon/calc": "^0.10.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

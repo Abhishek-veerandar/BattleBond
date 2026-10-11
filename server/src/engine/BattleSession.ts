@@ -307,6 +307,8 @@ export class BattleSession {
       this.locked.add(seat);
       const ok = this.engine.choose(seat, this.intents[seat]?.choice ?? 'default');
       if (!ok && this.engine.decision === decision && this.engine.needsChoice(seat)) {
+        // The planned choice was rejected (which also unlocked the seat): fall back to the default move.
+        this.locked.add(seat);
         this.engine.choose(seat, 'default');
       }
     }

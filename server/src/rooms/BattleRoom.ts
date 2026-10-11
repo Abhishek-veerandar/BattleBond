@@ -1,22 +1,30 @@
 import { Room, type Client } from 'colyseus';
 import {
   Msg,
+  PING_LABELS,
   SEATS,
-  type ChooseMsg,
-  type EndMsg,
+  partnerOf,
+  type ChatMsg,
+  type ChoiceMsg,
   type LobbyState,
+  type PingMsg,
+  type PingType,
   type SeatId,
   type SeatInfo,
+  type TeamEventMsg,
 } from '@tagteam/shared';
-import { TagTeamBattle } from '../engine/TagTeamBattle';
+import { BattleSession } from '../engine/BattleSession';
 import { SAMPLE_TEAMS } from '../data/sampleTeams';
 
-const BOT_DELAY_MS = 400;
+/** Seconds a player has to reconnect before a bot takes their seat for good. */
+const RECONNECT_SECONDS = 30;
+/** Pings + chat lines a player may send per 5 seconds. */
+const TEAM_EVENT_BURST = 6;
 
 /**
  * One room = one 4-seat tag team battle.
- * Seats fill in order p1, p2, p3, p4 (p1 + p3 are partners).
- * Any empty seat can be filled by a bot that always picks Showdown's default move.
+ * Seats fill in order p1, p2, p3, p4 (p1 + p3 are partners, p2 + p4 are partners).
+ * BattleSession does the battle and the co-op rules; this class only moves messages.
  */
 export class BattleRoom extends Room {
   maxClients = 4;
@@ -27,13 +35,13 @@ export class BattleRoom extends Room {
     p3: null,
     p4: null,
   };
-  private engine?: TagTeamBattle;
-  /** Everything each seat has been sent, so a reconnecting tab can catch up. */
-  private seatLogs: Record<SeatId, string[]> = { p1: [], p2: [], p3: [], p4: [] };
+  private session?: BattleSession;
+  private teamEventId = 0;
+  private recentEvents: Record<SeatId, number[]> = { p1: [], p2: [], p3: [], p4: [] };
 
   onCreate() {
     this.onMessage(Msg.FillBots, () => {
-      if (this.engine) return;
+      if (this.session) return;
       for (const seat of SEATS) {
         if (!this.seats[seat]) {
           this.seats[seat] = { seat, name: `Bot ${seat.toUpperCase()}`, bot: true, connected: true };
@@ -42,39 +50,80 @@ export class BattleRoom extends Room {
       this.startBattle();
     });
 
-    this.onMessage(Msg.Choose, (client, msg: ChooseMsg) => {
+    this.onMessage(Msg.Intent, (client, msg: ChoiceMsg) => {
       const seat = this.seatOf(client);
-      if (!seat || !this.engine || typeof msg?.choice !== 'string') return;
-      const current = this.engine.requests[seat];
-      // Drop choices meant for an older request.
-      if (msg.rqid !== undefined && current?.rqid !== undefined && msg.rqid !== current.rqid) return;
-      this.engine.choose(seat, msg.choice.slice(0, 100));
+      if (seat && this.session && typeof msg?.choice === 'string') this.session.setIntent(seat, msg.choice, msg.rqid);
+    });
+
+    this.onMessage(Msg.Lock, (client, msg: ChoiceMsg) => {
+      const seat = this.seatOf(client);
+      if (seat && this.session && typeof msg?.choice === 'string') this.session.lock(seat, msg.choice, msg.rqid);
+    });
+
+    this.onMessage(Msg.Unlock, (client) => {
+      const seat = this.seatOf(client);
+      if (seat && this.session) this.session.unlock(seat);
+    });
+
+    this.onMessage(Msg.Ping, (client, msg: PingMsg) => {
+      const seat = this.seatOf(client);
+      if (!seat || !msg || !(msg.type in PING_LABELS) || !this.allowTeamEvent(seat)) return;
+      this.sendTeamEvent(seat, { kind: 'ping', ping: msg.type as PingType });
+    });
+
+    this.onMessage(Msg.Chat, (client, msg: ChatMsg) => {
+      const seat = this.seatOf(client);
+      const text = typeof msg?.text === 'string' ? msg.text.trim().slice(0, 140) : '';
+      if (!seat || !text || !this.allowTeamEvent(seat)) return;
+      this.sendTeamEvent(seat, { kind: 'chat', text });
     });
   }
 
   onJoin(client: Client, options: { name?: string }) {
     const seat = SEATS.find((s) => !this.seats[s]);
     if (!seat) throw new Error('Room is full');
-    const name = (options?.name || '').trim().slice(0, 20) || `Player ${seat.toUpperCase()}`;
+    const name = (options?.name || '').trim().slice(0, 16) || `Player ${seat.toUpperCase()}`;
     this.seats[seat] = { seat, name, bot: false, connected: true, sessionId: client.sessionId };
     client.send(Msg.Seat, { seat });
     this.broadcastLobby();
-
     if (SEATS.every((s) => this.seats[s])) this.startBattle();
   }
 
-  onLeave(client: Client) {
+  async onLeave(client: Client, consented: boolean) {
     const seat = this.seatOf(client);
     if (!seat) return;
-    if (!this.engine) {
+    const info = this.seats[seat]!;
+
+    if (!this.session) {
       // Battle not started yet: free the seat.
       this.seats[seat] = null;
-    } else {
-      // Mid-battle: a bot takes over so the others can finish (M5 adds real reconnects).
-      const info = this.seats[seat]!;
-      this.seats[seat] = { ...info, name: `${info.name} (bot)`, bot: true, connected: false, sessionId: undefined };
-      this.maybeBotChoose(seat);
+      this.broadcastLobby();
+      return;
     }
+
+    info.connected = false;
+    this.broadcastLobby();
+
+    if (!consented && !this.session.isOver) {
+      try {
+        // Same tab refreshing or a phone dropping signal: hold the seat for a bit.
+        const back = await this.allowReconnection(client, RECONNECT_SECONDS);
+        info.connected = true;
+        info.sessionId = back.sessionId;
+        back.send(Msg.Seat, { seat });
+        this.broadcastLobby();
+        this.session.resync(seat);
+        return;
+      } catch {
+        // Didn't come back in time.
+      }
+    }
+
+    // Gone for good: a bot finishes the match so the partner isn't stranded.
+    info.bot = true;
+    info.sessionId = undefined;
+    info.name = `${info.name} (bot)`;
+    this.session.setBot(seat, true, info.name);
     this.broadcastLobby();
   }
 
@@ -87,60 +136,80 @@ export class BattleRoom extends Room {
     return id ? this.clients.find((c) => c.sessionId === id) : undefined;
   }
 
+  private send(seat: SeatId, type: string, payload: unknown) {
+    this.clientFor(seat)?.send(type, payload);
+  }
+
   private lobby(): LobbyState {
     const seats = {} as LobbyState['seats'];
     for (const s of SEATS) {
       const info = this.seats[s];
       seats[s] = info ? { seat: s, name: info.name, bot: info.bot, connected: info.connected } : null;
     }
-    return { seats, started: !!this.engine };
+    return { seats, started: !!this.session };
   }
 
   private broadcastLobby() {
     this.broadcast(Msg.Lobby, this.lobby());
   }
 
+  private allowTeamEvent(seat: SeatId) {
+    const now = Date.now();
+    const recent = this.recentEvents[seat].filter((t) => now - t < 5000);
+    if (recent.length >= TEAM_EVENT_BURST) return false;
+    recent.push(now);
+    this.recentEvents[seat] = recent;
+    return true;
+  }
+
+  /** Pings and chat go to both partners on the sender's side, never to opponents. */
+  private sendTeamEvent(from: SeatId, event: Pick<TeamEventMsg, 'kind' | 'ping' | 'text'>) {
+    const msg: TeamEventMsg = { id: ++this.teamEventId, from, fromName: this.seats[from]?.name ?? from, ...event };
+    this.send(from, Msg.TeamEvent, msg);
+    this.send(partnerOf[from], Msg.TeamEvent, msg);
+  }
+
   private startBattle() {
-    if (this.engine) return;
+    if (this.session) return;
     void this.lock();
 
-    const players = {} as Record<SeatId, { name: string; team: string }>;
-    for (const s of SEATS) players[s] = { name: this.seats[s]!.name, team: SAMPLE_TEAMS[s] };
+    const players = Object.fromEntries(
+      SEATS.map((s) => [s, { name: this.seats[s]!.name, team: SAMPLE_TEAMS[s], bot: this.seats[s]!.bot }]),
+    ) as ConstructorParameters<typeof BattleSession>[0];
 
     try {
-      this.engine = new TagTeamBattle(players, {
-        onLog: (seat, lines) => {
-          this.seatLogs[seat].push(...lines);
-          this.clientFor(seat)?.send(Msg.Log, { lines });
+      this.session = new BattleSession(
+        players,
+        {
+          log: (seat, lines) => this.send(seat, Msg.Log, { lines }),
+          request: (seat, request) => this.send(seat, Msg.Request, request),
+          calc: (seat, calc) => this.send(seat, Msg.Calc, calc),
+          plan: (seat, plan) => this.send(seat, Msg.Plan, plan),
+          timer: (msg) => this.broadcast(Msg.Timer, msg),
+          field: (state) => this.broadcast(Msg.Field, state),
+          error: (seat, message) => {
+            if (this.seats[seat]?.bot) console.warn(`[BattleRoom] bot ${seat} error: ${message}`);
+            this.send(seat, Msg.Error, { message });
+          },
+          end: (msg) => {
+            this.broadcast(Msg.End, msg);
+            // Give everyone time to see the result, then close the room.
+            this.clock.setTimeout(() => this.disconnect(), 5 * 60 * 1000);
+          },
         },
-        onRequest: (seat, request) => {
-          this.clientFor(seat)?.send(Msg.Request, request);
-          this.maybeBotChoose(seat);
+        {
+          schedule: (fn, ms) => {
+            const t = this.clock.setTimeout(fn, ms);
+            return () => t.clear();
+          },
         },
-        onError: (seat, message) => {
-          if (this.seats[seat]?.bot) console.warn(`[BattleRoom] bot ${seat} choice error: ${message}`);
-          this.clientFor(seat)?.send(Msg.Error, { message });
-        },
-        onEnd: (winner, winnerNames) => {
-          const msg: EndMsg = { winner, winnerNames };
-          this.broadcast(Msg.End, msg);
-          // Give clients a moment to show the result, then close the room.
-          this.clock.setTimeout(() => this.disconnect(), 5 * 60 * 1000);
-        },
-      });
+      );
+      this.broadcastLobby();
+      this.session.start();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[BattleRoom] failed to start battle:', err);
       this.broadcast(Msg.Error, { message: `Battle failed to start: ${message}` });
-      return;
     }
-    this.broadcastLobby();
-  }
-
-  private maybeBotChoose(seat: SeatId) {
-    if (!this.seats[seat]?.bot) return;
-    this.clock.setTimeout(() => {
-      if (this.engine?.needsChoice(seat)) this.engine.choose(seat, 'default');
-    }, BOT_DELAY_MS);
   }
 }

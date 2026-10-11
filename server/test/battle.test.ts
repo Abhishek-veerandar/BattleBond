@@ -31,6 +31,7 @@ describe('TagTeamBattle', () => {
       onEnd: () => {},
     });
 
+    battle.start();
     expect(battle.battle.sides).toHaveLength(4);
     for (const s of SEATS) {
       expect(requests[s]?.side.id).toBe(s);
@@ -62,6 +63,7 @@ describe('TagTeamBattle', () => {
       },
     });
 
+    battle.start();
     let steps = 0;
     while (!ended && queue.length && steps++ < 5000) {
       const s = queue.shift()!;

@@ -102,32 +102,31 @@ export function useGame() {
       patch({ end: m });
       saveToken(undefined);
     });
-    room.onLeave((code) => {
+    room.onLeave(() => {
+      // leave() clears roomRef first, so only an unexpected drop gets here with this room still current.
+      if (roomRef.current !== room) return;
       roomRef.current = undefined;
-      // 1000 = we left on purpose; anything else is a dropped connection.
-      if (code !== 1000) patch({ error: 'Lost connection to the server. Refresh to rejoin.' });
+      patch({ error: 'Lost connection to the server. Refresh to rejoin.' });
     });
   }, []);
 
-  // After a refresh, try to slip back into the same seat.
+  // After a refresh, try to slip back into the same seat. Only once: React's dev mode
+  // runs effects twice, and a second attempt (or leaving the first room) would hand
+  // the seat to a bot.
+  const reconnectTried = useRef(false);
   useEffect(() => {
+    if (reconnectTried.current) return;
+    reconnectTried.current = true;
     const token = loadToken();
     if (!token) return;
-    let cancelled = false;
     patch({ phase: 'connecting' });
     new Client(SERVER_URL)
       .reconnect(token)
-      .then((room) => {
-        if (cancelled) return void room.leave();
-        wire(room);
-      })
+      .then((room) => wire(room))
       .catch(() => {
         saveToken(undefined);
-        if (!cancelled) patch({ phase: 'title' });
+        patch({ phase: 'title' });
       });
-    return () => {
-      cancelled = true;
-    };
   }, [wire]);
 
   const join = useCallback(
@@ -160,8 +159,9 @@ export function useGame() {
     chat: (text: string) => send(Msg.Chat, { text }),
     leave: () => {
       saveToken(undefined);
-      void roomRef.current?.leave();
-      roomRef.current = undefined;
+      const room = roomRef.current;
+      roomRef.current = undefined; // before leave(), so onLeave knows this was on purpose
+      void room?.leave();
       dispatch({ type: 'reset' });
     },
   };

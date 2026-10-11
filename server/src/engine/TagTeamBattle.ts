@@ -1,5 +1,5 @@
 import { Battle, Dex, Teams } from '@pkmn/sim';
-import { SEATS, sideOf, type BattleRequest, type SeatId, type SideId } from '@tagteam/shared';
+import { SEATS, sideOf, type BattleRequest, type FieldState, type SeatId, type SideId } from '@tagteam/shared';
 
 /**
  * Wraps one @pkmn/sim Battle configured as a 4-player multi battle
@@ -21,6 +21,10 @@ export interface BattleHandlers {
   onRequest: (seat: SeatId, request: BattleRequest) => void;
   onError: (seat: SeatId, message: string) => void;
   onEnd: (winner: SideId | null, winnerNames: string) => void;
+  /** A new decision point began: fresh requests went out to one or more seats. */
+  onDecision?: (decision: number) => void;
+  /** The simulator produced output (the field may have changed). */
+  onUpdate?: () => void;
 }
 
 /** Base format we borrow rules from; we only change the game type. */
@@ -59,6 +63,9 @@ export class TagTeamBattle {
   readonly requests: Partial<Record<SeatId, BattleRequest>> = {};
   /** Seats that still owe a choice for their latest request. */
   private awaiting = new Set<SeatId>();
+  /** Counts decision points (turns, forced switches, team preview). */
+  decision = 0;
+  private newRequests = false;
 
   constructor(players: Record<SeatId, SeatPlayer>, handlers: BattleHandlers) {
     this.handlers = handlers;
@@ -76,6 +83,13 @@ export class TagTeamBattle {
       const { name, team } = players[seat];
       this.battle.setPlayer(seat, { name, team: Teams.pack(parseTeam(team)) });
     }
+  }
+
+  /**
+   * Start the battle and deliver the first requests. Kept separate from the
+   * constructor so callers can store `this` before any handler fires.
+   */
+  start() {
     // Newer simulator versions start automatically once all players are set.
     if (!this.battle.started) this.battle.start();
     this.flush();
@@ -88,6 +102,12 @@ export class TagTeamBattle {
    */
   private flush() {
     this.battle.sendUpdates();
+    this.handlers.onUpdate?.();
+    if (this.newRequests) {
+      this.newRequests = false;
+      this.decision++;
+      this.handlers.onDecision?.(this.decision);
+    }
     // Fallback in case this simulator version doesn't emit an 'end' message.
     if (this.battle.ended && !this.ended) this.handleEnd();
   }
@@ -110,6 +130,63 @@ export class TagTeamBattle {
     // Delivers the log for the turn and the next requests (re-adding seats to `awaiting`).
     this.flush();
     return ok;
+  }
+
+  /** The simulator's Side object for a seat (sides are ordered p1, p2, p3, p4). */
+  side(seat: SeatId) {
+    return this.battle.sides[SEATS.indexOf(seat)];
+  }
+
+  /** The seat's active Pokémon, or undefined before the battle starts. */
+  active(seat: SeatId) {
+    return this.side(seat)?.active[0] ?? undefined;
+  }
+
+  /** Public field state: what every player can see. HP is shown as a percentage. */
+  fieldState(): FieldState {
+    const b = this.battle;
+    const mons = {} as FieldState['mons'];
+    for (const seat of SEATS) {
+      const side = this.side(seat);
+      const mon = side?.active[0];
+      if (!side || !mon) {
+        mons[seat] = null;
+        continue;
+      }
+      const hpPercent = mon.hp <= 0 ? 0 : Math.max(1, Math.round((mon.hp / mon.maxhp) * 100));
+      mons[seat] = {
+        seat,
+        species: mon.species.name,
+        sprite: (mon.species as { spriteid?: string }).spriteid || mon.species.id,
+        hpPercent,
+        status: mon.status || '',
+        fainted: !!mon.fainted || mon.hp <= 0,
+        terastallized: mon.terastallized || undefined,
+        remaining: side.pokemon.filter((p: { fainted: boolean; hp: number }) => !p.fainted && p.hp > 0).length,
+      };
+    }
+    const conditions: FieldState['conditions'] = { A: [], B: [] };
+    for (const seat of SEATS) {
+      const side = this.side(seat);
+      if (!side) continue;
+      const list = conditions[sideOf(seat)];
+      for (const [id, state] of Object.entries(side.sideConditions ?? {})) {
+        const name = Dex.conditions.get(id).name || id;
+        if (list.some((c) => c.name === name)) continue;
+        const turns = (state as { duration?: number }).duration;
+        list.push({ name, turns: typeof turns === 'number' ? turns : null });
+      }
+    }
+    const weatherId = b.field.weather;
+    const terrainId = b.field.terrain;
+    return {
+      turn: b.turn,
+      weather: weatherId ? b.field.getWeather().name : null,
+      weatherTurns: weatherId ? (b.field.weatherState.duration ?? null) : null,
+      terrain: terrainId ? b.field.getTerrain().name : null,
+      conditions,
+      mons,
+    };
   }
 
   /** True if this seat currently owes the simulator a choice. */
@@ -164,9 +241,14 @@ export class TagTeamBattle {
       const json = body.slice('|request|'.length);
       if (!json) return;
       const request = JSON.parse(json) as BattleRequest;
+      const previous = this.requests[seat];
       this.requests[seat] = request;
       if (request.wait) this.awaiting.delete(seat);
-      else this.awaiting.add(seat);
+      else {
+        this.awaiting.add(seat);
+        // A re-sent request (same rqid, e.g. after an invalid choice) is not a new decision.
+        if (request.rqid === undefined || request.rqid !== previous?.rqid) this.newRequests = true;
+      }
       this.handlers.onRequest(seat, request);
     } else if (body.startsWith('|error|')) {
       this.handlers.onError(seat, body.slice('|error|'.length));

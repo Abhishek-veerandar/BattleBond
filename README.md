@@ -1,51 +1,58 @@
-# Tag Team — M1 (battle core)
+# BattleBond
 
-Two players per side, 3 Pokémon each, one 4-player Showdown multi battle (p1 + p3 vs p2 + p4).
-M1 proves the engine and the 4-seat room work. The UI is intentionally plain.
+A co-op Pokémon tag battle for the browser. Two trainers share one side of a 2v2 battle, each with 3 Pokémon, and win by coordinating every turn.
+
+**Status:** M2 (coordination) done. M1 (battle core) done.
 
 ## Run it
 
-Needs Node 20+ and pnpm (`corepack enable` gives you pnpm).
+Needs Node 20+ and pnpm (`npm install -g pnpm`).
 
 ```bash
 pnpm install
-pnpm test          # M1 gate: a full 4-player battle plays to a winner
-pnpm sim:demo      # same battle, printed in the terminal
+pnpm test          # engine + co-op session tests
 pnpm dev           # game server on :2567 + web client on :5173
 ```
 
-Then open http://localhost:5173:
+Open http://localhost:5173, enter a trainer name and press **PLAY**:
 
-- **4 tabs:** join in each tab; the battle starts when the 4th seat fills.
-- **1 tab:** join, then press **Fill empty seats with bots**.
-- **Phone on the same Wi-Fi:** open `http://<your-computer-ip>:5173`.
+- **4 tabs:** join in each tab; the battle starts when the 4th seat fills. Tabs 1 and 3 are partners, tabs 2 and 4 are rivals.
+- **2 tabs + bots:** join in two tabs, then press **FILL WITH BOTS**. The two tabs are partners against a bot pair.
+- **1 tab:** join, then **FILL WITH BOTS**. You play with a bot partner against a bot pair.
 
-Seats fill in order p1, p2, p3, p4, so tabs 1 and 3 are partners (side A), tabs 2 and 4 are side B.
+Refreshing a tab mid-battle puts you back in your seat (you have 30 seconds).
+
+## How a turn works
+
+1. Every decision starts a **45-second timer**.
+2. You pick a move (and a target), a switch, or Tera. Your partner sees it live as an arrow on the field, marked *not locked*.
+3. **Pings** (Focus left, Protect me, …) and **team chat** go only to your partner.
+4. Damage **estimates** show on each move, and when you and your partner hit the same foe the game tells you if it's a *likely KO together*.
+5. Press **LOCK IN**. You can **UNLOCK** until your partner locks too; then both choices go to the battle.
+6. When the timer runs out, whatever you planned is locked for you (or a default move if you picked nothing).
+
+Opponents never see your plans, pings or chat.
 
 ## Layout
 
 ```
-shared/   message names + types used by client and server
+shared/src/index.ts              message names + types used by client and server
 server/
-  src/engine/TagTeamBattle.ts   @pkmn/sim wrapper: multi format, per-seat logs and requests
-  src/rooms/BattleRoom.ts       Colyseus room: seats, bots, choices
-  src/data/sampleTeams.ts       hardcoded M1 teams
-  src/scripts/simDemo.ts        terminal battle
-  test/battle.test.ts           M1 gate tests
+  src/engine/TagTeamBattle.ts    @pkmn/sim wrapper: 4-player multi format, per-seat logs/requests, public field state
+  src/engine/BattleSession.ts    co-op layer: intents, locks, turn timer, bots (no networking, fully testable)
+  src/engine/estimates.ts        damage estimates via @smogon/calc (foes use public info only)
+  src/rooms/BattleRoom.ts        Colyseus room: seats, reconnects, pings, chat
+  src/data/sampleTeams.ts        sample teams (team builder comes in M3)
+  test/                          engine + session tests
 client/
-  src/App.tsx                   join, seats, move/switch/target buttons, log
-  src/formatLog.ts              Showdown protocol → readable lines
+  src/net.ts                     connection + game state hook
+  src/ui.tsx                     scaled stage, sprites, HP bars
+  src/screens/Menus.tsx          title + lobby
+  src/screens/Battle.tsx         battle screen
 ```
 
-## How a turn works
+## Fair play
 
-1. The simulator sends each seat a private `request` (its moves, team, HP).
-2. The player picks a move (and target), a switch, or Tera; the client sends a Showdown choice string like `move 1 2`.
-3. When all 4 seats have chosen, the simulator plays the turn and the server sends each seat the log lines it is allowed to see.
-4. Bots answer every request with Showdown's `default` choice.
+The server is authoritative: clients only send choice strings, which the server checks against the current request. Damage estimates for foes use only what every player can see (species, boosts, status, Tera type, field), never their hidden EVs or items.
 
-## Where to look if something breaks
-
-- **Battle won't start / wrong number of sides:** `makeTagTeamFormat()` in `TagTeamBattle.ts`. Showdown has no built-in "multi battle with custom teams" format, so we clone Doubles Custom Game and switch it to `multi` with 4 players.
-- **"Invalid choice" on a targeted move:** target slot numbers in `App.tsx` (`selfLoc` / `partnerLoc`).
-- **Can't connect from the client:** the server must be running on port 2567; set `VITE_SERVER_URL` to override.
+Sprites load from Pokémon Showdown's sprite server. This is a private, non-commercial fan project.

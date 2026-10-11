@@ -29,6 +29,8 @@ const battle = new TagTeamBattle(players, {
   },
 });
 
+battle.start();
+
 // Drain choices until the battle ends (with a safety cap).
 let steps = 0;
 while (!done && steps++ < 5000) {

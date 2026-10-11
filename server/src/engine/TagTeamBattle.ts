@@ -78,6 +78,18 @@ export class TagTeamBattle {
     }
     // Newer simulator versions start automatically once all players are set.
     if (!this.battle.started) this.battle.start();
+    this.flush();
+  }
+
+  /**
+   * The simulator queues log lines and requests until sendUpdates() is called
+   * (Showdown's own BattleStream calls it after every command), so we flush
+   * after starting and after every choice.
+   */
+  private flush() {
+    this.battle.sendUpdates();
+    // Fallback in case this simulator version doesn't emit an 'end' message.
+    if (this.battle.ended && !this.ended) this.handleEnd();
   }
 
   get isOver() {
@@ -87,8 +99,6 @@ export class TagTeamBattle {
   /** Submit a Showdown choice string for one seat. Errors arrive via onError. */
   choose(seat: SeatId, choice: string): boolean {
     if (this.isOver || !this.awaiting.has(seat)) return false;
-    // Clear first: a successful choice can synchronously start the next turn
-    // and deliver the next request (which re-adds the seat) before choose() returns.
     this.awaiting.delete(seat);
     let ok = false;
     try {
@@ -96,7 +106,9 @@ export class TagTeamBattle {
     } catch (err) {
       this.handlers.onError(seat, err instanceof Error ? err.message : String(err));
     }
-    if (!ok && !this.isOver) this.awaiting.add(seat);
+    if (!ok && !this.battle.ended) this.awaiting.add(seat);
+    // Delivers the log for the turn and the next requests (re-adding seats to `awaiting`).
+    this.flush();
     return ok;
   }
 
